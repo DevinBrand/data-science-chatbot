@@ -1,36 +1,52 @@
 from flask import Flask, render_template, request, jsonify
 import os
-import warnings
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.chat_models import ChatOpenAI
-from langchain_pinecone import PineconeVectorStore
+import openai
+from pinecone import Pinecone
 
-warnings.filterwarnings("ignore")
 load_dotenv()
 
 app = Flask(__name__)
 
+# Initialize OpenAI and Pinecone
+openai.api_key = os.getenv("OPENAI_API_KEY")
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index(os.getenv("INDEX_NAME"))
 
-# Initialize the chat components
-def init_chat():
-    embeddings = OpenAIEmbeddings(api_key=os.environ.get("OPENAI_API_KEY"))
-    vectorstore = PineconeVectorStore(
-        index_name=os.environ["INDEX_NAME"],
-        embedding=embeddings
-    )
-    chat = ChatOpenAI(verbose=True, temperature=0, model_name="gpt-3.5-turbo")
-    return ConversationalRetrievalChain.from_llm(
-        llm=chat,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever()
-    )
-
-
-# Initialize chat outside of routes
-qa = init_chat()
 chat_history = []
+
+
+def get_embedding(text):
+    response = openai.embeddings.create(
+        model="text-embedding-ada-002",
+        input=text
+    )
+    return response.data[0].embedding
+
+
+def query_pinecone(embedding, top_k=3):
+    results = index.query(
+        vector=embedding,
+        top_k=top_k,
+        include_metadata=True
+    )
+    return results
+
+
+def generate_response(query, context):
+    messages = [
+        {"role": "system",
+         "content": "You are a helpful assistant. Use the following context to answer the question: " + context},
+        {"role": "user", "content": query}
+    ]
+
+    response = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        temperature=0
+    )
+
+    return response.choices[0].message.content
 
 
 @app.route('/')
@@ -41,20 +57,27 @@ def home():
 @app.route('/ask', methods=['POST'])
 def ask():
     try:
-        user_message = request.json['message']
+        data = request.json
+        user_message = data['message']
 
-        input_dict = {
-            "question": user_message,
-            "chat_history": chat_history
-        }
+        # Get embedding for the question
+        embedding = get_embedding(user_message)
 
-        res = qa.invoke(input_dict)
+        # Query Pinecone
+        results = query_pinecone(embedding)
 
-        chat_history.append((user_message, res["answer"]))
+        # Combine context from results
+        context = " ".join([r.metadata.get('text', '') for r in results.matches])
+
+        # Generate response using OpenAI
+        answer = generate_response(user_message, context)
+
+        # Update chat history
+        chat_history.append((user_message, answer))
 
         return jsonify({
             'status': 'success',
-            'answer': res["answer"]
+            'answer': answer
         })
 
     except Exception as e:
