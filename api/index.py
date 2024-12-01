@@ -1,61 +1,36 @@
 from flask import Flask, render_template, request, jsonify
 import os
+import warnings
 from dotenv import load_dotenv
-import openai
-from pinecone import Pinecone
+from langchain_openai import OpenAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+from langchain_community.chat_models import ChatOpenAI
+from langchain_pinecone import PineconeVectorStore
 
+warnings.filterwarnings("ignore")
 load_dotenv()
 
 app = Flask(__name__)
 
-# Initialize OpenAI and Pinecone
-openai.api_key = os.getenv("OPENAI_API_KEY")
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(os.getenv("INDEX_NAME"))
 
-# Store chat history as a global variable
-global_chat_history = []
-
-
-def get_embedding(text):
-    response = openai.embeddings.create(
-        model="text-embedding-ada-002",
-        input=text
+# Initialize the chat components
+def init_chat():
+    embeddings = OpenAIEmbeddings(api_key=os.environ.get("OPENAI_API_KEY"))
+    vectorstore = PineconeVectorStore(
+        index_name=os.environ["INDEX_NAME"],
+        embedding=embeddings
     )
-    return response.data[0].embedding
-
-
-def query_pinecone(embedding, top_k=3):
-    results = index.query(
-        vector=embedding,
-        top_k=top_k,
-        include_metadata=True
-    )
-    return results
-
-
-def generate_response(query, context, history):
-    messages = [
-        {"role": "system",
-         "content": "You are a helpful assistant. Use the following context to answer the question. If the context doesn't contain relevant information, say so: " + context},
-    ]
-
-    # Add chat history
-    for past_query, past_response in history[-3:]:
-        messages.extend([
-            {"role": "user", "content": past_query},
-            {"role": "assistant", "content": past_response}
-        ])
-
-    messages.append({"role": "user", "content": query})
-
-    response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=messages,
-        temperature=0
+    chat = ChatOpenAI(verbose=True, temperature=0, model_name="gpt-3.5-turbo")
+    return ConversationalRetrievalChain.from_llm(
+        llm=chat,
+        chain_type="stuff",
+        retriever=vectorstore.as_retriever()
     )
 
-    return response.choices[0].message.content
+
+# Initialize chat outside of routes
+qa = init_chat()
+chat_history = []
 
 
 @app.route('/')
@@ -66,32 +41,20 @@ def home():
 @app.route('/ask', methods=['POST'])
 def ask():
     try:
-        data = request.json
-        user_message = data['message']
-        client_chat_history = data.get('chatHistory', [])
+        user_message = request.json['message']
 
-        # Get embedding for the question
-        embedding = get_embedding(user_message)
+        input_dict = {
+            "question": user_message,
+            "chat_history": chat_history
+        }
 
-        # Query Pinecone
-        results = query_pinecone(embedding)
+        res = qa.invoke(input_dict)
 
-        # Combine context from results
-        context = " ".join([
-            match.metadata.get('text', '')
-            for match in results.matches
-            if hasattr(match, 'metadata')
-        ])
-
-        # Generate response using OpenAI
-        answer = generate_response(user_message, context, global_chat_history)
-
-        # Update global chat history
-        global_chat_history.append((user_message, answer))
+        chat_history.append((user_message, res["answer"]))
 
         return jsonify({
             'status': 'success',
-            'answer': answer
+            'answer': res["answer"]
         })
 
     except Exception as e:
@@ -100,7 +63,3 @@ def ask():
             'status': 'error',
             'message': str(e)
         }), 500
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
