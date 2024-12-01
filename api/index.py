@@ -15,21 +15,34 @@ app = Flask(__name__)
 
 # Initialize the chat components
 def init_chat():
-    embeddings = OpenAIEmbeddings(api_key=os.environ.get("OPENAI_API_KEY"))
-    vectorstore = PineconeVectorStore(
-        index_name=os.environ["INDEX_NAME"],
-        embedding=embeddings
-    )
-    chat = ChatOpenAI(verbose=True, temperature=0, model_name="gpt-3.5-turbo")
-    return ConversationalRetrievalChain.from_llm(
-        llm=chat,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever()
-    )
+    try:
+        embeddings = OpenAIEmbeddings(api_key=os.environ.get("OPENAI_API_KEY"))
+        vector_store = PineconeVectorStore(
+            index_name=os.environ["INDEX_NAME"],
+            embedding=embeddings
+        )
+        llm = ChatOpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            verbose=True,
+            temperature=0,
+            model_name="gpt-3.5-turbo"
+        )
+        qa_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever()
+        )
+        return qa_chain
+    except Exception as e:
+        print(f"Error initializing chat: {str(e)}")
+        return None
 
 
 # Initialize chat outside of routes
 qa = init_chat()
+if qa is None:
+    raise Exception("Failed to initialize chat")
+
 chat_history = []
 
 
